@@ -76,33 +76,7 @@ tensor = torch.as_tensor(shared_memory_slot)  # ✅ Metadata-only view
 **Benefit:**
 - Direct mapping avoids intermediate python-level array object construction across process boundaries.
 
-### Optimization #2: Paused Garbage Collection
-
-**Problem:** Python GC scans objects, causing pauses
-
-**Solution:** Disable GC in tight loop
-
-```python
-# worker.py (simplified)
-def run(self):
-    gc.disable()  # ✅ No allocations = no garbage
-    
-    while True:
-        idx, slot = task_queue.get()
-        
-        # Reuse same file handle (no allocation)
-        file_handle.seek(offset)
-        
-        # Write directly to pre-allocated buffer (no allocation)
-        file_handle.readinto(shared_memory[slot])
-        
-        done_queue.put(slot)
-```
-
-**Impact:**
-- Disabling GC during the hot read loop provides slightly more predictable latency.
-
-### Optimization #3: Pre-Allocation
+### Optimization #2: Pre-Allocation
 
 **Problem:** Dynamic allocation is slow
 
@@ -152,8 +126,8 @@ fast-array-dataloader/
 ## 🔧 Installation
 
 ```bash
-git clone https://github.com/Simon-Bertrand/superfastdataloader.git
-cd superfastdataloader
+git clone git@github.com:Simon-Bertrand/FastArrayDataLoader-PyTorch.git
+cd FastArrayDataLoader-PyTorch
 pip install -e .
 ```
 
@@ -198,34 +172,51 @@ for batch in loader:
 
 ---
 
-## �️ Custom Datasets (JPEG, PNG, etc.)
+## 🖼️ Custom Datasets (JPEG, PNG, etc.)
 
 While `FileMappedDataset` is optimized for raw binary, you can implement `SuperFastDataset` to load **any** format. The workers will load the data into the pre-allocated shared memory slots.
 
+### Example: Dual Image Dataset (1024x1024)
+
 ```python
-from fast_array_dataloader import SuperFastDataset
+from fast_array_dataloader import SuperFastDataset, FastArrayDataLoader
+import numpy as np
 import cv2
 
-class MyJpegDataset(SuperFastDataset):
-    def __init__(self, img_paths, labels, schema):
-        self.img_paths = img_paths
+class DualImageDataset(SuperFastDataset):
+    def __init__(self, image_pairs, labels):
+        self.image_pairs = image_pairs # List of (path1, path2)
         self.labels = labels
-        self._schema = schema
+        self._schema = {
+            "im1": ((1024, 1024, 3), np.uint8),
+            "im2": ((1024, 1024, 3), np.uint8),
+            "label": ((1,), np.int64)
+        }
 
     @property
     def schema(self): return self._schema
 
-    def __len__(self): return len(self.img_paths)
+    def __len__(self): return len(self.image_pairs)
 
     def load_sample(self, index, slot_arrays):
-        # 1. Load your data (JPEG, NPZ, etc.)
-        img = cv2.imread(self.img_paths[index])
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        p1, p2 = self.image_pairs[index]
         
-        # 2. Copy into the pre-allocated shared memory slot
-        # slot_arrays["image"] is a view into shared memory
-        slot_arrays["image"][:] = img
+        # Load and decode (any format)
+        img1 = cv2.cvtColor(cv2.imread(p1), cv2.COLOR_BGR2RGB)
+        img2 = cv2.cvtColor(cv2.imread(p2), cv2.COLOR_BGR2RGB)
+        
+        # Direct write into pre-allocated shared memory view
+        slot_arrays["im1"][:] = img1
+        slot_arrays["im2"][:] = img2
         slot_arrays["label"][:] = self.labels[index]
+
+# Usage
+dataset = DualImageDataset(pairs, labels)
+loader = FastArrayDataLoader(dataset, batch_size=8, num_workers=4)
+
+for batch in loader:
+    # batch["im1"] is a (8, 1024, 1024, 3) torch.Tensor
+    ...
 ```
 
 > [!TIP]
@@ -284,26 +275,3 @@ A: Only if applied on the **GPU**. Applying CPU-based transforms (like random cr
 
 ### Q: Why is it only for fixed shapes?
 A: Zero-copy shared memory requires pre-allocated buffers of a specific size. Dynamic shapes would require frequent re-allocation, which is exactly what this library aims to avoid.
-
-### Q: What if I have 0 workers?
-A: `FastArrayDataLoader` requires at least 1 worker process. Serial execution (num_workers=0) is disabled to ensure the high-performance path is always used.
-
----
-
-## 📄 License
-MIT License.
-
----
-
-## 📚 Citation
-```bibtex
-@software{fastarraydataloader2026,
-  author = {Simon Bertrand},
-  title = {FastArrayDataLoader: Specialized Zero-Copy DataLoader for PyTorch},
-  year = {2026},
-  url = {https://github.com/Simon-Bertrand/FastArrayDataLoader-PyTorch}
-}
-```
-
----
-
